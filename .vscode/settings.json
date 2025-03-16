@@ -1,0 +1,16 @@
+{
+    "C_Cpp.intelliSenseEngine": "default",
+    "idf.espIdfPath": "/home/aki/esp/esp-idf",
+    "idf.pythonInstallPath": "/usr/bin/python",
+    "idf.openOcdConfigs": [
+        "board/esp32c3-builtin.cfg"
+    ],
+    "idf.port": "/dev/ttyACM0",
+    "idf.toolsPath": "/home/aki/.espressif",
+    "idf.customExtraVars": {
+        "OPENOCD_SCRIPTS": "/home/aki/.espressif/tools/openocd-esp32/v0.12.0-esp32-20230921/openocd-esp32/share/openocd/scripts",
+        "ESP_ROM_ELF_DIR": "/home/aki/.espressif/tools/esp-rom-elfs/20230320/",
+        "IDF_TARGET": "esp32c3"
+    },
+    "idf.flashType": "UART"
+}
