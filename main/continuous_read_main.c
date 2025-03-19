@@ -4,9 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/cdefs.h>
+#include "esp_err.h"
+#include "freertos/projdefs.h"
+#include "hal/gpio_types.h"
+#include "hal/uart_types.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -14,7 +19,9 @@
 #include "freertos/semphr.h"
 #include "esp_adc/adc_continuous.h"
 #include "driver/gpio.h"
+#include "soc/clk_tree_defs.h"
 #include "soc/gpio_num.h"
+#include "driver/uart.h"
 
 #include "cJSON.h"
 #include "cJSON_Utils.h"
@@ -52,22 +59,30 @@ static const char *TAG = "EXAMPLE";
 #define NUM_PINS 3  // Number of GPIOs to read
 
 // Define the GPIO pins to read
-const gpio_num_t gpio_pins_pedals_in[SWS_NUM] = {GPIO_NUM_22, GPIO_NUM_23, GPIO_NUM_32, GPIO_NUM_33, GPIO_NUM_21, GPIO_NUM_5};
-const gpio_num_t gpio_pins_ui_in[UISW_NUM] = {GPIO_NUM_16, GPIO_NUM_17, GPIO_NUM_18, GPIO_NUM_19};
+const gpio_num_t gpio_pins_pedals_in[SWS_NUM] = {GPIO_NUM_5, GPIO_NUM_33, GPIO_NUM_32, GPIO_NUM_21, GPIO_NUM_22, GPIO_NUM_23};
+const gpio_num_t gpio_pins_ui_in[UISW_NUM] = {GPIO_NUM_17, GPIO_NUM_18, GPIO_NUM_16, GPIO_NUM_19};
                                             //next bank    prev_bank    next preset     prev preset
-const gpio_num_t gpio_pins_leds[LEDS_NUM] = {GPIO_NUM_12, GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_25, GPIO_NUM_26, GPIO_NUM_27};
+const gpio_num_t gpio_pins_leds[LEDS_NUM] = {GPIO_NUM_25, GPIO_NUM_26, GPIO_NUM_27, GPIO_NUM_14, GPIO_NUM_12, GPIO_NUM_13};
 
 // Function to configure GPIO pins as input with pull-down enabled
 void configure_pins() {
     for (int i = 0; i < SWS_NUM; i++) {
+        gpio_reset_pin(gpio_pins_pedals_in[i]);
         gpio_pulldown_dis(gpio_pins_pedals_in[i]);   // Ensure pull-up is disabled
         gpio_pullup_en(gpio_pins_pedals_in[i]);  // Enable internal pull-down resistor
         gpio_set_direction(gpio_pins_pedals_in[i], GPIO_MODE_INPUT);
     }
     for (int i = 0; i < UISW_NUM; i++) {
+        gpio_reset_pin(gpio_pins_ui_in[i]);
         gpio_pulldown_dis(gpio_pins_ui_in[i]);   // Ensure pull-up is disabled
         gpio_pullup_en(gpio_pins_ui_in[i]);  // Enable internal pull-down resistor
         gpio_set_direction(gpio_pins_ui_in[i], GPIO_MODE_INPUT);
+    }
+    for (int i = 0; i < LEDS_NUM; i++) {
+        gpio_reset_pin(gpio_pins_leds[i]);
+        gpio_set_direction(gpio_pins_leds[i], GPIO_MODE_OUTPUT);
+        gpio_pullup_dis(gpio_pins_leds[i]);  // Enable internal pull-down resistor
+        gpio_pulldown_en(gpio_pins_leds[i]);   // Ensure pull-up is disabled
     }
 }
 
@@ -162,8 +177,35 @@ static void continuous_adc_init(adc_channel_t *channel, uint8_t channel_num, adc
     *out_handle = handle;
 }
 
+void apply_led_states(uint8_t *led_states) {
+    for (int led = 0; led < LEDS_NUM; led++) {
+        gpio_set_level(gpio_pins_leds[led], led_states[led]);
+        ESP_LOGI(__func__, "led on gpio [%d] set to [%d]", gpio_pins_leds[led], led_states[led]);
+    }
+}
+
+#define RX_BUF_SIZE 2048
+#define TX_BUF_SIZE 2048
+#define QUEUE_SIZE 2048
+
 void app_main(void)
 {
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT
+    };
+    int intr_alloc_flags = 0;
+
+    ESP_ERROR_CHECK(uart_driver_install(0, RX_BUF_SIZE, TX_BUF_SIZE, QUEUE_SIZE, NULL, intr_alloc_flags));
+    ESP_ERROR_CHECK(uart_param_config(0, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(0, GPIO_NUM_1, GPIO_NUM_3, -1, -1));
+    uint8_t *data_rx = (uint8_t*) malloc(RX_BUF_SIZE);
+    uint8_t *data_tx = (uint8_t*) malloc(TX_BUF_SIZE);
+    uint8_t *data_queue = (uint8_t*) malloc(QUEUE_SIZE);
 
     esp_err_t ret;
     uint32_t ret_num = 0;
@@ -187,6 +229,7 @@ void app_main(void)
     uint32_t pots_vals[POTS_NUM] = {0};
     uint8_t sw_vals[SWS_NUM] = {0, 0, 0, 0, 0};
     uint8_t uisw_vals[UISW_NUM] = {0, 0, 0, 0};
+    uint8_t leds_states[LEDS_NUM] = {0, 0, 0, 0, 0, 0};
     char pedal_names[64][6];
 
     char *current_bank_buf = calloc(64, 1);
@@ -196,6 +239,11 @@ void app_main(void)
     curr_action = "none";
     ui_action_enum_t curr_action_enum = UI_ACTION_NONE;
     ui_action_enum_t last_action_enum = UI_ACTION_NONE;
+
+    char *read_from_serial_buf = (char*) calloc(1024, 1);
+    if (!read_from_serial_buf) {
+        ESP_LOGE("CALLOC FAIL", "read_from_serial_buf");
+    }
     
     while (1) {
 
@@ -261,11 +309,45 @@ void app_main(void)
                     cJSON_AddItemToObject(dataOut, "pedals", pedal_switches);
                     cJSON_AddItemToObject(dataOut, "pots", pots_values);
                     cJSON_AddItemToObject(dataOut, "ui_action", ui_action);
+                    char *dataOut_buf = cJSON_PrintUnformatted(dataOut);
+                    uart_write_bytes(0, dataOut_buf, strlen(dataOut_buf));
+                    uart_write_bytes(0, "\n", 1);
 
-                    printf("%s\n", cJSON_PrintUnformatted(dataOut));
-                    cJSON_free(dataOut);
+//                    printf("%s\n", cJSON_PrintUnformatted(dataOut));
+                    cJSON_Delete(dataOut);
+                    free(dataOut_buf);
                 }
                 curr_action_enum = UI_ACTION_NONE;
+
+                cJSON *recv_json = NULL;
+
+                int len = uart_read_bytes(0, data_rx, RX_BUF_SIZE -1, pdMS_TO_TICKS(100));
+                if (len) {
+                    data_rx[len] = '\0';
+                    ESP_LOGI(TAG, "Recv str: %s", (char *) data_rx);
+                    recv_json = cJSON_Parse((char*) data_rx);
+                }
+
+                if (recv_json != NULL) {
+
+                    ESP_LOGI("JSON READ", "success");
+                    
+                    cJSON *pedal_arr_j = cJSON_GetObjectItemCaseSensitive(recv_json, "pedals_onoff");
+                    for (int led = 0; led < cJSON_GetArraySize(pedal_arr_j);led++){
+                        cJSON *eff_state_tuple = cJSON_GetArrayItem(pedal_arr_j, led);
+                        cJSON *pedal_state_j = cJSON_GetObjectItemCaseSensitive(eff_state_tuple, "val");
+                        leds_states[led] = cJSON_GetNumberValue(pedal_state_j);
+                        //ESP_LOGI("cJSON delete", "tuple and pedal state");
+                        //cJSON_Delete(eff_state_tuple);
+                        //cJSON_Delete(pedal_state_j);
+                    }
+                    //ESP_LOGI("cJSON delete", "pedal array");
+                    cJSON_Delete(pedal_arr_j);
+                    apply_led_states(leds_states);
+                } else {
+                    //ESP_LOGW("JSON READ", "FAIL");
+                }
+                
                 /**
                  * Because printing is slow, so every time you call `ulTaskNotifyTake`, it will immediately return.
                  * To avoid a task watchdog timeout, add a delay here. When you replace the way you process the data,
