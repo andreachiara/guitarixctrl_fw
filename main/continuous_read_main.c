@@ -60,6 +60,8 @@ static const char *TAG = "EXAMPLE";
 
 // Define the GPIO pins to read
 const gpio_num_t gpio_pins_pedals_in[SWS_NUM] = {GPIO_NUM_5, GPIO_NUM_33, GPIO_NUM_32, GPIO_NUM_21, GPIO_NUM_22, GPIO_NUM_23};
+const uint8_t pedals_inverted[SWS_NUM] = {1, 1, 1, 1, 1, 1 };
+
 const gpio_num_t gpio_pins_ui_in[UISW_NUM] = {GPIO_NUM_17, GPIO_NUM_18, GPIO_NUM_16, GPIO_NUM_19};
                                             //next bank    prev_bank    next preset     prev preset
 const gpio_num_t gpio_pins_leds[LEDS_NUM] = {GPIO_NUM_25, GPIO_NUM_26, GPIO_NUM_27, GPIO_NUM_14, GPIO_NUM_12, GPIO_NUM_13};
@@ -98,7 +100,7 @@ typedef enum UI_ACTION {
 // Function to read the state of GPIO pins
 void read_gpio(uint8_t *pins_values, ui_action_enum_t *action) {
     for (int i = 0; i < SWS_NUM; i++) {
-        pins_values[i] = gpio_get_level(gpio_pins_pedals_in[i]);
+        pins_values[i] = gpio_get_level(gpio_pins_pedals_in[i]) ^ pedals_inverted[i];
         //printf("GPIO %d: %d\n", gpio_pins[i], level);
     }
 
